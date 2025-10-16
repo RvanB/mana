@@ -10,8 +10,8 @@ dependencies = [
     "faiss-cpu>=1.7.4",
 ]
 
-[tool.setuptools]
-packages = ["mana"]
+[tool.setuptools.packages.find]
+exclude = ["media*"]
 
 [project.scripts]
 mana = "mana.cli:main"
