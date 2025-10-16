@@ -1,0 +1,113 @@
+#+TITLE: Mana - Semantic Search for Command-Line Tools
+#+AUTHOR: RvanB
+#+DATE: 2025
+
+* Overview
+
+*Mana* is a semantic search tool for discovering command-line programs through natural language queries. Instead of remembering exact program names, simply describe what you want to do and Mana will help you find the relevant tools in your system.
+
+Mana indexes all man pages on your system and lets you search them semantically through an interactive TUI.
+
+** Philosophy: Use What You Have
+
+Mana is built around a simple idea: *before installing yet another tool, discover what you already have*. Rather than maintaining a database of all possible command-line tools, Mana only indexes the programs already installed on your system. This means:
+
+- You discover tools you didn't know you had
+- No need to install additional utilities for common tasks
+- Learn about the powerful programs already in your PATH
+- Great for exploring what came with your OS or development environment
+
+This makes Mana an excellent learning tool for command-line discovery. You might be surprised by how many powerful utilities are already waiting on your system!
+
+* Features
+
+- *Semantic Search* - Search by intent, not exact keywords
+- *Your Tools Only* - Indexes only what's installed on your system
+- *Learning Tool* - Discover utilities you didn't know you had
+- *Fast & Lightweight* - Local embeddings with efficient FAISS indexing
+- *Modern TUI* - Clean, keyboard-driven interface
+- *Favorites* - Mark frequently used programs for quick access
+- *Auto-updates* - Incrementally updates index on each startup
+
+* Installation
+
+** Quick Install (Recommended)
+
+Install directly from GitHub with ~uv~ - the ~mana~ command will be automatically available on your PATH:
+#+begin_src bash
+# Install as a tool with uv
+uv tool install git+https://github.com/RvanB/mana.git
+
+# Or run directly without installing (uvx)
+uvx --from git+https://github.com/RvanB/mana.git mana "rotate an image"
+#+end_src
+
+** Manual install
+You can also install it with pip, either by cloning first or just installing the git repository:
+#+begin_src bash
+  pip install git+https://github.com/RvanB/mana.git
+#+end_src
+
+* Usage
+
+** Basic Search
+
+#+begin_src bash
+# Launch TUI and search
+mana "rotate an image"
+
+# Or launch TUI without query
+mana
+#+end_src
+
+** Command-line Mode
+
+#+begin_src bash
+# Print results to stdout (no TUI)
+mana "compress a video" --no-tui
+
+# Force complete database reindex
+mana --force-reindex
+
+# Adjust number of workers for indexing
+mana --force-reindex --workers 16
+#+end_src
+
+** TUI Navigation
+
+| Key    | Action                |
+|--------+-----------------------|
+| ~/~ or ~s~ | Search                |
+| ~↑~ / ~↓~  | Navigate results      |
+| ~←~ / ~→~  | Page left/right       |
+| ~Enter~  | View man page         |
+| ~m~      | Mark/unmark favorite  |
+| ~v~      | Toggle favorites view |
+| ~q~      | Quit                  |
+
+Vim and Emacs keybinds are also supported (hjkl, bnpf)
+
+* How It Works
+
+1. *Discovery* - Scans your man path for man pages
+2. *Indexing* - Extracts man page content and generates embeddings
+3. *Search* - Uses FAISS vector similarity to find semantically relevant programs
+4. *Display* - Present top N FAISS results in a nicely navigable TUI where you can enter and exit man pages
+
+** Incremental Updates
+
+Mana automatically maintains its index:
+
+- On first run: Builds complete index of all available programs
+- On subsequent runs: Detects new/removed programs and updates incrementally
+
+* Configuration
+
+Data is stored in ~~/.mana/~:
+
+| File           | Description               |
+|----------------+---------------------------|
+| ~vectors.faiss~  | FAISS index               |
+| ~chunks.pkl~     | Program chunks & metadata |
+| ~metadata.json~  | Index statistics          |
+| ~favorites.json~ | Favorited programs        |
