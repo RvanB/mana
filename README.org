@@ -24,7 +24,7 @@ This makes Mana an excellent learning tool for command-line discovery. You might
 - *Learning Tool* - Discover utilities you didn't know you had
 - *Fast & Lightweight* - Local embeddings with efficient FAISS indexing
 - *Modern TUI* - Clean, keyboard-driven interface
-- *Favorites* - Mark frequently used programs for quick access
+- *Favorites* - Mark programs of interest for future or quick reference
 - *Auto-updates* - Incrementally updates index on each startup
 
 * Installation
