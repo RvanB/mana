@@ -2,11 +2,11 @@
 #+AUTHOR: RvanB
 #+DATE: 2025
 
+#+HTML: <p align="center"><img src="https://raw.githubusercontent.com/RvanB/mana/main/media/demo.gif" width="80%"></p>
+
 * Overview
 
 A command-line utility that brings semantic search to your UNIX man pages. Mana indexes all man pages on your system and lets you search them semantically through an interactive TUI.
-
-[[./media/demo.gif][Mana TUI demo showing semantic search for command-line tools]]
 
 ** Philosophy: Use What You Have
 
