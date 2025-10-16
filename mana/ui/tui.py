@@ -14,7 +14,10 @@ def run_tui(
     initial_query: str = "",
     initial_results: List[Dict[str, str]] = None,
     top_k: int = DEFAULT_TOP_K,
-    search_fn: Callable[[str, int], List[Dict[str, str]]] = None
+    search_fn: Callable[[str, int], List[Dict[str, str]]] = None,
+    is_favorite_fn: Callable[[str], bool] = None,
+    toggle_favorite_fn: Callable[[str], None] = None,
+    get_favorites_fn: Callable[[], List[Dict[str, str]]] = None
 ):
     """Run the curses-based TUI.
 
@@ -23,12 +26,21 @@ def run_tui(
         initial_results: Initial search results to display
         top_k: Number of results to return per search
         search_fn: Search callback function(query, top_k) -> results
+        is_favorite_fn: Check if program is favorited callback(program) -> bool
+        toggle_favorite_fn: Toggle favorite status callback(program) -> None
+        get_favorites_fn: Get all favorites as results callback() -> results
 
     Note: The database index must already exist before calling this function.
     Use ensure_index_exists() in cli.py to build it if needed.
     """
     if search_fn is None:
         raise ValueError("search_fn callback is required")
+    if is_favorite_fn is None:
+        raise ValueError("is_favorite_fn callback is required")
+    if toggle_favorite_fn is None:
+        raise ValueError("toggle_favorite_fn callback is required")
+    if get_favorites_fn is None:
+        raise ValueError("get_favorites_fn callback is required")
     def main_loop(stdscr):
         # Initialize colors
         curses.start_color()
@@ -37,11 +49,13 @@ def run_tui(
         curses.init_pair(2, curses.COLOR_GREEN, -1)
         curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_WHITE)
         curses.init_pair(4, curses.COLOR_YELLOW, -1)
+        curses.init_pair(5, curses.COLOR_RED, -1)  # For favorites
 
         results = initial_results or []
         selected_idx = 0
         current_page = 0
         query = initial_query
+        viewing_favorites = False  # Track if we're in favorites view
 
         # Hide cursor by default
         curses.curs_set(0)
@@ -54,16 +68,23 @@ def run_tui(
             stdscr.border()
 
             # Draw title
-            title = " mana - Program Discovery "
+            if viewing_favorites:
+                title = " mana - Favorites ★ "
+            else:
+                title = " mana - Program Discovery "
             stdscr.addstr(0, (width - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
 
-            # Draw search box with padding
-            search_label = "Search: "
-            stdscr.addstr(2, 4, search_label, curses.color_pair(4))
-            stdscr.addstr(2, 4 + len(search_label), query[:width - 8 - len(search_label)])
+            # Draw search box with padding (only in search mode)
+            if not viewing_favorites:
+                search_label = "Search: "
+                stdscr.addstr(2, 4, search_label, curses.color_pair(4))
+                stdscr.addstr(2, 4 + len(search_label), query[:width - 8 - len(search_label)])
 
             # Draw help text - simple version, but we support vim/emacs bindings secretly
-            help_text = "/:search | ESC:cancel | q:quit | Enter:man | ↑/↓:navigate | ←/→:page"
+            if viewing_favorites:
+                help_text = "v:back to search | m:unmark | q:quit | Enter:man | ↑/↓:navigate"
+            else:
+                help_text = "/:search | v:favorites | m:mark | q:quit | Enter:man | ↑/↓:navigate"
             stdscr.addstr(height - 1, 4, help_text[:width-8], curses.color_pair(2))
 
             # Calculate list area with more padding
@@ -99,9 +120,11 @@ def run_tui(
 
                     y = list_start_y + i
                     is_selected = result_idx == selected_idx
+                    is_fav = is_favorite_fn(program)
 
-                    # Format line with better spacing
-                    line = f"  {program:<22} {description}"
+                    # Format line with better spacing and favorite indicator
+                    fav_marker = "★ " if is_fav else "  "
+                    line = f"{fav_marker}{program:<22} {description}"
                     line = line[:width-8]  # Truncate to fit with padding
 
                     if is_selected:
@@ -109,7 +132,9 @@ def run_tui(
                         stdscr.addstr(y, 2, " " * (width - 4), curses.color_pair(3))
                         stdscr.addstr(y, 2, line, curses.color_pair(3) | curses.A_BOLD)
                     else:
-                        stdscr.addstr(y, 2, line)
+                        # Color favorites in red
+                        color = curses.color_pair(5) if is_fav else curses.color_pair(0)
+                        stdscr.addstr(y, 2, line, color)
 
             stdscr.refresh()
 
@@ -121,7 +146,38 @@ def run_tui(
 
             if key == ord('q'):
                 break
+            elif key == ord('v'):  # Toggle favorites view
+                viewing_favorites = not viewing_favorites
+                if viewing_favorites:
+                    # Switch to favorites view
+                    results = get_favorites_fn()
+                    selected_idx = 0
+                    current_page = 0
+                else:
+                    # Switch back to search view
+                    if query:
+                        results = search_fn(query, top_k)
+                    else:
+                        results = []
+                    selected_idx = 0
+                    current_page = 0
+            elif key == ord('m'):  # Mark/unmark favorite
+                if results and 0 <= selected_idx < len(results):
+                    program = results[selected_idx].get('program', '')
+                    if program:
+                        toggle_favorite_fn(program)
+                        # If we're in favorites view and unmarked, refresh the list
+                        if viewing_favorites:
+                            results = get_favorites_fn()
+                            # Adjust selection if we're now past the end
+                            if selected_idx >= len(results) and results:
+                                selected_idx = len(results) - 1
+                            elif not results:
+                                selected_idx = 0
             elif key == ord('/') or key == ord('s') or (not results and key >= 32 and key <= 126):  # '/' or 's' or typing when no results
+                # Don't allow search in favorites view
+                if viewing_favorites:
+                    continue
                 # Enter search mode
                 curses.noecho()  # Disable echo, we'll handle it manually
                 curses.curs_set(1)
