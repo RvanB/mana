@@ -17,5 +17,5 @@ def get_embedding_model() -> Any:
         from sentence_transformers import SentenceTransformer
 
         # all-MiniLM-L6-v2: fast, small (80MB), good quality
-        _EMBEDDING_MODEL = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        _EMBEDDING_MODEL = SentenceTransformer(EMBEDDING_MODEL_NAME, device='cpu')
     return _EMBEDDING_MODEL
