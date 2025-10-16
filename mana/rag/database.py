@@ -197,8 +197,6 @@ def build_vector_database(
 
     new_man_pages = {}  # program -> man_page_text
     new_programs = []
-    embedding_model = get_embedding_model()
-
     # Discover all man pages once (much faster than checking per program)
     if verbose and not progress_callback:
         print(f"\nDiscovering man page files...")
@@ -271,15 +269,13 @@ def build_vector_database(
             print(f"  Done!")
 
     # Embed only NEW man pages, not existing ones
-    embedding_model = get_embedding_model()
-    
     if new_chunks:
         # Truncate to reasonable length to avoid token limits (most models have ~512 token limit)
         texts_to_embed = [c["text"][:MAX_TEXT_LENGTH] for c in new_chunks]
-        
         if verbose and not progress_callback:
             print(f"\nEmbedding {len(new_chunks)} new man pages...")
-
+        # Lazy load embedding model only when needed
+        embedding_model = get_embedding_model()
         # For progress tracking: encode in batches to update progress
         if progress_callback:
             batch_size = 32  # Process in batches for progress updates
@@ -292,7 +288,6 @@ def build_vector_database(
             new_embeddings = np.vstack(embeddings_list)
         else:
             new_embeddings = embedding_model.encode(texts_to_embed, convert_to_numpy=True, show_progress_bar=False)
-
         if verbose and not progress_callback:
             print(f"  Done!")
     else:
@@ -347,6 +342,7 @@ def search_vector_database(query: str, top_k: int = 200) -> List[Dict[str, str]]
     index, chunks = result
 
     # Semantic search with FAISS
+    # Lazy load embedding model only when searching
     model = get_embedding_model()
     query_embedding = model.encode(query, convert_to_numpy=True)
     query_embedding = query_embedding.reshape(1, -1)

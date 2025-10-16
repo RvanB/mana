@@ -44,6 +44,21 @@ def ensure_index_exists(force_reindex: bool, max_workers: int, verbose: bool = T
 
 
 def main():
+    import threading
+    import time
+    from .rag.embeddings import get_embedding_model
+
+    # Start background model loading
+    model_ready_event = threading.Event()
+    model_loading_error = [None]
+    def load_model_bg():
+        try:
+            get_embedding_model()
+            model_ready_event.set()
+        except Exception as e:
+            model_loading_error[0] = e
+            model_ready_event.set()
+    threading.Thread(target=load_model_bg, daemon=True).start()
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Semantic search for command-line programs using FAISS.",
@@ -138,7 +153,9 @@ def main():
             is_favorite_fn=is_favorite_callback,
             toggle_favorite_fn=toggle_favorite_callback,
             get_favorites_fn=get_favorites_callback,
-            init_manager=init_manager
+            init_manager=init_manager,
+            model_ready_event=model_ready_event,
+            model_loading_error=model_loading_error
         )
     else:
         # Either no query, or index needs full rebuild - launch TUI immediately with initialization
@@ -170,5 +187,7 @@ def main():
             is_favorite_fn=is_favorite_callback,
             toggle_favorite_fn=toggle_favorite_callback,
             get_favorites_fn=get_favorites_callback,
-            init_manager=init_manager
+            init_manager=init_manager,
+            model_ready_event=model_ready_event,
+            model_loading_error=model_loading_error
         )

@@ -7,6 +7,7 @@ import os
 import subprocess
 import time
 from typing import List, Dict, Callable, Optional
+import threading
 
 from ..config import DEFAULT_TOP_K
 from ..init_manager import InitializationManager, InitStage
@@ -20,7 +21,9 @@ def run_tui(
     is_favorite_fn: Callable[[str], bool] = None,
     toggle_favorite_fn: Callable[[str], None] = None,
     get_favorites_fn: Callable[[], List[Dict[str, str]]] = None,
-    init_manager: Optional[InitializationManager] = None
+    init_manager: Optional[InitializationManager] = None,
+    model_ready_event: Optional['threading.Event'] = None,
+    model_loading_error: Optional[list] = None
 ):
     """Run the curses-based TUI.
 
@@ -45,6 +48,10 @@ def run_tui(
         raise ValueError("toggle_favorite_fn callback is required")
     if get_favorites_fn is None:
         raise ValueError("get_favorites_fn callback is required")
+    import threading
+    from queue import Queue, Empty
+    import time
+
     def main_loop(stdscr):
         # Initialize modern color scheme
         curses.start_color()
@@ -68,6 +75,26 @@ def run_tui(
         viewing_favorites = False  # Track if we're in favorites view
         spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
         spinner_idx = 0
+
+        # For async search
+        search_in_progress = False
+        search_queue = Queue()
+        search_thread = None
+
+        # Use provided model_ready_event and model_loading_error for model status
+        def start_search(q, query, top_k):
+            # Wait for model to be ready before searching
+            if model_ready_event is not None:
+                while not model_ready_event.is_set():
+                    time.sleep(0.1)
+                if model_loading_error is not None and len(model_loading_error) > 0 and model_loading_error[0] is not None:
+                    q.put([])
+                    return
+            try:
+                res = search_fn(query, top_k)
+                q.put(res)
+            except Exception as e:
+                q.put([])
 
         # Hide cursor by default
         curses.curs_set(0)
@@ -149,6 +176,13 @@ def run_tui(
                     query_color = curses.color_pair(0) if query else curses.color_pair(2)
                     stdscr.addstr(2, 2 + len(search_label), query_text[:width - 6 - len(search_label)], query_color)
 
+                # If search is in progress, show spinner and message
+                if search_in_progress:
+                    spinner = spinner_chars[spinner_idx % len(spinner_chars)]
+                    msg = f"{spinner} Searching..."
+                    msg_x = max(2, (width - len(msg)) // 2)
+                    stdscr.addstr(height // 2, msg_x, msg, curses.color_pair(9) | curses.A_BOLD)
+
                 # Draw help text with modern look
                 if viewing_favorites:
                     help_text = "v back  │  m unmark  │  ↑↓ navigate  │  ⏎ view  │  q quit"
@@ -160,9 +194,9 @@ def run_tui(
             list_start_y = 4
             list_height = height - 6  # Leave space for bottom border and help text
 
-            # Draw results with pagination (only when not initializing)
-            if is_initializing:
-                # Don't show results during initialization
+            # Draw results with pagination (only when not initializing or searching)
+            if is_initializing or search_in_progress:
+                # Don't show results during initialization or search
                 pass
             elif not results:
                 # Just show empty space when no results
@@ -191,15 +225,12 @@ def run_tui(
                     similarity = chunk.get('similarity', 0)
 
                     # Strip redundant program name from description
-                    # e.g. "display - displays an image" -> "displays an image"
                     desc_lower = description.lower()
                     prog_lower = program.lower()
-                    # Check for common patterns: "program - description" or "program – description"
                     for separator in [' - ', ' – ', ' — ']:
                         prefix = prog_lower + separator
                         if desc_lower.startswith(prefix):
                             description = description[len(prefix):].strip()
-                            # Capitalize first letter
                             if description:
                                 description = description[0].upper() + description[1:]
                             break
@@ -208,30 +239,22 @@ def run_tui(
                     is_selected = result_idx == selected_idx
                     is_fav = is_favorite_fn(program)
 
-                    # Modern list item layout - arrow and blue text for selection
-                    # Cursor indicator (only show on selected)
                     if is_selected:
                         cursor = "▶ "
-                        stdscr.addstr(y, 2, cursor, curses.color_pair(3) | curses.A_BOLD)  # Blue arrow
+                        stdscr.addstr(y, 2, cursor, curses.color_pair(3) | curses.A_BOLD)
                     else:
                         stdscr.addstr(y, 2, "  ", curses.color_pair(0))
 
-                    # Favorite star (red) - shown after arrow/space
                     star_x = 4
                     if is_fav:
-                        stdscr.addstr(y, star_x, "★ ", curses.color_pair(8))  # Red star
+                        stdscr.addstr(y, star_x, "★ ", curses.color_pair(8))
                     else:
-                        stdscr.addstr(y, star_x, "  ", curses.color_pair(0))  # Empty space to align
+                        stdscr.addstr(y, star_x, "  ", curses.color_pair(0))
 
-                    # Program name - blue if selected, always starts at same position
                     prog_x = 6
-                    if is_selected:
-                        prog_color = curses.color_pair(3)  # Blue for selected
-                    else:
-                        prog_color = curses.color_pair(6)  # Default (no special color for favorites)
+                    prog_color = curses.color_pair(3) if is_selected else curses.color_pair(6)
                     stdscr.addstr(y, prog_x, program, prog_color | curses.A_BOLD)
 
-                    # Description - blue if selected, always starts at same position
                     desc_x = prog_x + 24
                     desc_text = description[:width - desc_x - 2]
                     desc_color = curses.color_pair(3) if is_selected else curses.color_pair(7)
@@ -239,7 +262,7 @@ def run_tui(
 
             stdscr.refresh()
 
-            # Handle input
+            # Handle input and search thread
             try:
                 key = stdscr.getch()
             except KeyboardInterrupt:
@@ -249,8 +272,19 @@ def run_tui(
             if is_initializing:
                 if key == ord('q'):
                     break
-                # Ignore all other input and continue showing status
                 continue
+
+            # If search is in progress, check for results
+            if search_in_progress:
+                try:
+                    new_results = search_queue.get_nowait()
+                    results = new_results
+                    search_in_progress = False
+                    selected_idx = 0
+                    current_page = 0
+                except Empty:
+                    spinner_idx += 1
+                    continue
 
             # Handle -1 (no input due to timeout) - just refresh the display
             if key == -1:
@@ -258,76 +292,64 @@ def run_tui(
 
             if key == ord('q'):
                 break
-            elif key == ord('v'):  # Toggle favorites view
+            elif key == ord('v'):
                 viewing_favorites = not viewing_favorites
                 if viewing_favorites:
-                    # Switch to favorites view
                     results = get_favorites_fn()
                     selected_idx = 0
                     current_page = 0
                 else:
-                    # Switch back to search view
                     if query:
                         results = search_fn(query, top_k)
                     else:
                         results = []
                     selected_idx = 0
                     current_page = 0
-            elif key == ord('m'):  # Mark/unmark favorite
+            elif key == ord('m'):
                 if results and 0 <= selected_idx < len(results):
                     program = results[selected_idx].get('program', '')
                     if program:
                         toggle_favorite_fn(program)
-                        # If we're in favorites view and unmarked, refresh the list
                         if viewing_favorites:
                             results = get_favorites_fn()
-                            # Adjust selection if we're now past the end
                             if selected_idx >= len(results) and results:
                                 selected_idx = len(results) - 1
                             elif not results:
                                 selected_idx = 0
-            elif key == ord('/') or key == ord('s') or (not results and key >= 32 and key <= 126):  # '/' or 's' or typing when no results
-                # Don't allow search in favorites view
+            elif key == ord('/') or key == ord('s') or (not results and key >= 32 and key <= 126):
                 if viewing_favorites:
                     continue
-                # Enter search mode
-                curses.noecho()  # Disable echo, we'll handle it manually
+                curses.noecho()
                 curses.curs_set(1)
-                stdscr.addstr(2, 2, " " * (width - 4))  # Clear line
+                stdscr.addstr(2, 2, " " * (width - 4))
                 stdscr.addstr(2, 2, "› ", curses.color_pair(4) | curses.A_BOLD)
                 stdscr.refresh()
 
-                # Get input using textpad for better control
                 input_win = curses.newwin(1, width - 8, 2, 4)
                 input_win.keypad(True)
-
-                # Read input character by character to handle ESC
                 new_query = ""
-
-                # If we started with a character (not '/' or 's'), add it
                 if key != ord('/') and key != ord('s'):
                     new_query = chr(key)
                     input_win.addch(chr(key))
 
                 while True:
                     ch = input_win.getch()
-                    if ch == 27:  # ESC
-                        # Cancel search, restore previous query
+                    if ch == 27:
                         new_query = None
                         break
-                    elif ch == ord('\n') or ch == 10:  # Enter
+                    elif ch == ord('\n') or ch == 10:
                         break
-                    elif ch == curses.KEY_BACKSPACE or ch == 127 or ch == 8:  # Backspace
+                    elif ch == curses.KEY_BACKSPACE or ch == 127 or ch == 8:
                         if new_query:
                             new_query = new_query[:-1]
                             y, x = input_win.getyx()
                             if x > 0:
                                 input_win.move(y, x - 1)
                                 input_win.delch()
-                    elif ch == curses.KEY_DOWN:  # Down arrow - exit to results
+                    elif ch == curses.KEY_DOWN:
                         new_query = None
                         break
-                    elif 32 <= ch <= 126:  # Printable character
+                    elif 32 <= ch <= 126:
                         new_query += chr(ch)
                         input_win.addch(chr(ch))
                     input_win.refresh()
@@ -339,10 +361,13 @@ def run_tui(
                 # Only update if we didn't cancel
                 if new_query is not None and new_query.strip():
                     query = new_query.strip()
-                    results = search_fn(query, top_k)
-                    selected_idx = 0
-                    current_page = 0
-            elif key == curses.KEY_DOWN or key == ord('j') or key == ord('n'):  # Down arrow or j or n
+                    # Start search in background thread
+                    search_in_progress = True
+                    search_thread = threading.Thread(target=start_search, args=(search_queue, query, top_k))
+                    search_thread.daemon = True
+                    search_thread.start()
+                    spinner_idx = 0
+            elif key == curses.KEY_DOWN or key == ord('j') or key == ord('n'):
                 if results:
                     page_size = list_height
                     page_start = current_page * page_size
@@ -357,7 +382,7 @@ def run_tui(
                         # At the last item, wrap to first item on first page
                         selected_idx = 0
                         current_page = 0
-            elif key == curses.KEY_UP or key == ord('k') or key == ord('p'):  # Up arrow or k or p
+            elif key == curses.KEY_UP or key == ord('k') or key == ord('p'):
                 if results:
                     page_size = list_height
                     page_start = current_page * page_size
@@ -371,7 +396,7 @@ def run_tui(
                         # At the first item, wrap to last item on last page
                         selected_idx = len(results) - 1
                         current_page = (len(results) - 1) // page_size
-            elif key == curses.KEY_RIGHT or key == ord('l') or key == ord('f'):  # Right arrow or l or f
+            elif key == curses.KEY_RIGHT or key == ord('l') or key == ord('f'):
                 if results:
                     page_size = list_height
                     total_pages = (len(results) + page_size - 1) // page_size
@@ -379,7 +404,7 @@ def run_tui(
                         current_page += 1
                         # Move selection to first item on new page
                         selected_idx = current_page * page_size
-            elif key == curses.KEY_LEFT or key == ord('h') or key == ord('b'):  # Left arrow or h or b
+            elif key == curses.KEY_LEFT or key == ord('h') or key == ord('b'):
                 if results:
                     page_size = list_height
                     if current_page > 0:
