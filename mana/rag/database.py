@@ -115,13 +115,25 @@ def build_vector_database(
     # Check for existing index and do incremental update if not forcing
     existing_programs = []
     existing_chunks = []
+    existing_embeddings = None
     if not force:
         existing_programs = get_indexed_programs()
         if existing_programs:
-            # Load existing chunks
+            # Load existing chunks and index
             db = load_vector_database()
             if db:
-                _, existing_chunks = db
+                existing_index, existing_chunks = db
+                # Extract embeddings from FAISS index
+                # IndexFlatL2 stores vectors directly, so we can reconstruct them
+                try:
+                    existing_embeddings = np.zeros((existing_index.ntotal, existing_index.d), dtype=np.float32)
+                    for i in range(existing_index.ntotal):
+                        existing_embeddings[i] = existing_index.reconstruct(i)
+                except Exception as e:
+                    # If reconstruction fails, we'll re-embed everything
+                    existing_embeddings = None
+                    if verbose:
+                        print(f"Warning: Could not extract existing embeddings: {e}")
 
             # Compute diff
             programs_set = set(programs)
@@ -137,19 +149,46 @@ def build_vector_database(
                     print(f"  New to index: {len(new_programs)} programs")
                 else:
                     print(f"  No new programs to index!")
-                    return
-            elif not new_programs:
-                # No new programs - exit early
+                    if not removed_programs:
+                        return
+            elif not new_programs and not removed_programs:
+                # No new programs and nothing removed - database is up to date
+                if progress_callback:
+                    progress_callback("complete", len(existing_programs), len(existing_programs), "Database is up to date")
                 return
 
             # Only process new programs
             programs = new_programs
 
-            # Filter out chunks from removed programs
+            # Filter out chunks from removed programs and their embeddings
             if removed_programs:
                 removed_set = set(removed_programs)
-                existing_chunks = [c for c in existing_chunks if c.get('program') not in removed_set]
+                # Build mapping to keep track of indices
+                filtered_chunks = []
+                filtered_embeddings = []
+                for i, chunk in enumerate(existing_chunks):
+                    if chunk.get('program') not in removed_set:
+                        filtered_chunks.append(chunk)
+                        if existing_embeddings is not None:
+                            filtered_embeddings.append(existing_embeddings[i])
+                
+                existing_chunks = filtered_chunks
+                if filtered_embeddings:
+                    existing_embeddings = np.array(filtered_embeddings)
+                else:
+                    existing_embeddings = None
                 existing_programs = [p for p in existing_programs if p not in removed_set]
+                
+                # If we only removed programs (no new ones), save the updated database
+                if not programs and existing_embeddings is not None:
+                    if progress_callback:
+                        progress_callback("saving", 0, 1, f"Removing {len(removed_programs)} programs from database...")
+                    save_vector_database(existing_chunks, existing_embeddings, existing_programs)
+                    if progress_callback:
+                        progress_callback("complete", len(existing_programs), len(existing_programs), f"Removed {len(removed_programs)} programs")
+                    elif verbose:
+                        print(f"✓ Removed {len(removed_programs)} programs from database")
+                    return
 
     if not programs:
         if not progress_callback:
@@ -231,9 +270,46 @@ def build_vector_database(
         if verbose and not progress_callback:
             print(f"  Done!")
 
-    # Merge with existing data
+    # Embed only NEW man pages, not existing ones
+    embedding_model = get_embedding_model()
+    
+    if new_chunks:
+        # Truncate to reasonable length to avoid token limits (most models have ~512 token limit)
+        texts_to_embed = [c["text"][:MAX_TEXT_LENGTH] for c in new_chunks]
+        
+        if verbose and not progress_callback:
+            print(f"\nEmbedding {len(new_chunks)} new man pages...")
+
+        # For progress tracking: encode in batches to update progress
+        if progress_callback:
+            batch_size = 32  # Process in batches for progress updates
+            embeddings_list = []
+            for i in range(0, len(texts_to_embed), batch_size):
+                batch = texts_to_embed[i:i + batch_size]
+                batch_embeddings = embedding_model.encode(batch, convert_to_numpy=True, show_progress_bar=False)
+                embeddings_list.append(batch_embeddings)
+                progress_callback("embedding", min(i + batch_size, len(texts_to_embed)), len(new_chunks), f"Embedding {min(i + batch_size, len(texts_to_embed))}/{len(new_chunks)} new man pages")
+            new_embeddings = np.vstack(embeddings_list)
+        else:
+            new_embeddings = embedding_model.encode(texts_to_embed, convert_to_numpy=True, show_progress_bar=False)
+
+        if verbose and not progress_callback:
+            print(f"  Done!")
+    else:
+        new_embeddings = np.array([]).reshape(0, existing_embeddings.shape[1] if existing_embeddings is not None else 384)
+
+    # Merge chunks and embeddings
     all_chunks = existing_chunks + new_chunks
     all_programs = sorted(set(existing_programs + new_programs))
+    
+    # Concatenate embeddings
+    if existing_embeddings is not None and len(existing_embeddings) > 0:
+        if len(new_embeddings) > 0:
+            all_embeddings = np.vstack([existing_embeddings, new_embeddings])
+        else:
+            all_embeddings = existing_embeddings
+    else:
+        all_embeddings = new_embeddings
 
     if verbose and not progress_callback:
         if new_programs:
@@ -241,32 +317,9 @@ def build_vector_database(
         print(f"  Total programs: {len(all_programs)}")
         print(f"  Total chunks: {len(all_chunks)}")
 
-    # Embed full man pages (but we'll still display the NAME section)
-    # Truncate to reasonable length to avoid token limits (most models have ~512 token limit)
-    texts_to_embed = [c["text"][:MAX_TEXT_LENGTH] for c in all_chunks]
-    # Disable sentence-transformers' internal progress bar to avoid semaphore leak warning
-    if verbose and not progress_callback:
-        print(f"\nEmbedding {len(all_chunks)} man pages...")
-
-    # For progress tracking: encode in batches to update progress
-    if progress_callback:
-        batch_size = 32  # Process in batches for progress updates
-        embeddings_list = []
-        for i in range(0, len(texts_to_embed), batch_size):
-            batch = texts_to_embed[i:i + batch_size]
-            batch_embeddings = embedding_model.encode(batch, convert_to_numpy=True, show_progress_bar=False)
-            embeddings_list.append(batch_embeddings)
-            progress_callback("embedding", min(i + batch_size, len(texts_to_embed)), len(all_chunks), f"Embedding {min(i + batch_size, len(texts_to_embed))}/{len(all_chunks)} man pages")
-        embeddings = np.vstack(embeddings_list)
-    else:
-        embeddings = embedding_model.encode(texts_to_embed, convert_to_numpy=True, show_progress_bar=False)
-
-    if verbose and not progress_callback:
-        print(f"  Done!")
-
     if progress_callback:
         progress_callback("saving", 0, 1, "Saving to disk...")
-    save_vector_database(all_chunks, embeddings, all_programs)
+    save_vector_database(all_chunks, all_embeddings, all_programs)
     if progress_callback:
         progress_callback("complete", len(all_programs), len(all_programs), f"Indexed {len(all_programs)} programs")
     elif verbose:

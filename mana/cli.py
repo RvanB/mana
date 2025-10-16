@@ -8,6 +8,7 @@ from .rag import search_vector_database, build_vector_database, load_vector_data
 from .ui import run_tui
 from .config import DEFAULT_TOP_K, DEFAULT_WORKERS, FAISS_INDEX_FILE, CHUNKS_FILE
 from .favorites import FavoritesManager
+from .init_manager import InitializationManager
 
 
 def print_results(results, n: int):
@@ -106,12 +107,29 @@ def main():
 
         return fav_results
 
-    if args.query:
-        # Build index first if needed (outside TUI)
-        ensure_index_exists(args.force_reindex, args.workers, verbose=False)
-
-        # Search and launch TUI with results
+    # Check if index needs full rebuild (doesn't exist or forced)
+    needs_full_rebuild = args.force_reindex or not FAISS_INDEX_FILE.exists() or not CHUNKS_FILE.exists()
+    
+    # In TUI mode, we always check for updates (incremental or full rebuild)
+    # For queries with existing index, we can search first then update in background
+    if args.query and not needs_full_rebuild:
+        # Query provided and index exists - search first, then launch TUI with background update
         results = search_callback(args.query, args.n)
+        init_manager = InitializationManager()
+        
+        # Define initialization function for incremental update
+        def init_fn(progress_callback):
+            """Update database in background."""
+            build_vector_database(
+                verbose=False,
+                max_workers=args.workers,
+                force=False,  # Incremental update
+                progress_callback=progress_callback
+            )
+        
+        # Always start background update check
+        init_manager.start_initialization(init_fn)
+        
         run_tui(
             initial_query=args.query,
             initial_results=results,
@@ -119,17 +137,38 @@ def main():
             search_fn=search_callback,
             is_favorite_fn=is_favorite_callback,
             toggle_favorite_fn=toggle_favorite_callback,
-            get_favorites_fn=get_favorites_callback
+            get_favorites_fn=get_favorites_callback,
+            init_manager=init_manager
         )
     else:
-        # No query - build index if needed, then launch TUI
-        ensure_index_exists(args.force_reindex, args.workers, verbose=False)
+        # Either no query, or index needs full rebuild - launch TUI immediately with initialization
+        init_manager = InitializationManager()
+        
+        # Define initialization function
+        def init_fn(progress_callback):
+            """Initialize/update database in background."""
+            build_vector_database(
+                verbose=False,
+                max_workers=args.workers,
+                force=args.force_reindex,
+                progress_callback=progress_callback
+            )
+        
+        # Start initialization/update in background
+        init_manager.start_initialization(init_fn)
+        
+        # Launch TUI with initial query/results if provided
+        initial_results = []
+        if args.query and not needs_full_rebuild:
+            initial_results = search_callback(args.query, args.n)
+        
         run_tui(
-            initial_query="",
-            initial_results=[],
+            initial_query=args.query or "",
+            initial_results=initial_results,
             top_k=args.n,
             search_fn=search_callback,
             is_favorite_fn=is_favorite_callback,
             toggle_favorite_fn=toggle_favorite_callback,
-            get_favorites_fn=get_favorites_callback
+            get_favorites_fn=get_favorites_callback,
+            init_manager=init_manager
         )
