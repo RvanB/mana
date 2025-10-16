@@ -2,7 +2,7 @@
 #+AUTHOR: RvanB
 #+DATE: 2025
 
-#+HTML: <p align="center"><img src="https://raw.githubusercontent.com/RvanB/mana/main/media/demo.webp" width="80%"></p>
+#+HTML: <p align="center"><img src="https://raw.githubusercontent.com/RvanB/mana/main/media/demo.webp" width="100%"></p>
 
 * Overview
 
