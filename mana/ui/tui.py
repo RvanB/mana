@@ -42,14 +42,19 @@ def run_tui(
     if get_favorites_fn is None:
         raise ValueError("get_favorites_fn callback is required")
     def main_loop(stdscr):
-        # Initialize colors
+        # Initialize modern color scheme
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_CYAN, -1)
-        curses.init_pair(2, curses.COLOR_GREEN, -1)
-        curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_WHITE)
-        curses.init_pair(4, curses.COLOR_YELLOW, -1)
-        curses.init_pair(5, curses.COLOR_RED, -1)  # For favorites
+
+        # Modern color palette - blue as accent color
+        curses.init_pair(1, curses.COLOR_BLUE, -1)         # Title/headers/accents - blue
+        curses.init_pair(2, 240, -1)                        # Help text - dim gray
+        curses.init_pair(3, curses.COLOR_BLUE, -1)         # Selection text - blue
+        curses.init_pair(4, curses.COLOR_BLUE, -1)         # Search label - blue
+        curses.init_pair(5, curses.COLOR_MAGENTA, -1)      # Unused
+        curses.init_pair(6, -1, -1)                         # Program names - default terminal color
+        curses.init_pair(7, 244, -1)                        # Descriptions - medium gray
+        curses.init_pair(8, curses.COLOR_RED, -1)          # Favorite star - red
 
         results = initial_results or []
         selected_idx = 0
@@ -64,32 +69,43 @@ def run_tui(
             stdscr.clear()
             height, width = stdscr.getmaxyx()
 
-            # Draw border
-            stdscr.border()
-
-            # Draw title
+            # Draw title with icon
             if viewing_favorites:
-                title = " mana - Favorites ★ "
+                title = "★ Favorites"
+                stdscr.addstr(0, 2, title, curses.color_pair(1) | curses.A_BOLD)
             else:
-                title = " mana - Program Discovery "
-            stdscr.addstr(0, (width - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
+                title = "◉ mana"
+                stdscr.addstr(0, 2, title, curses.color_pair(1) | curses.A_BOLD)
+
+            # Draw count in top right
+            if results:
+                count_text = f"{len(results)} results"
+                stdscr.addstr(0, width - len(count_text) - 2, count_text, curses.color_pair(2))
+
+            # Draw horizontal line under the header (using hyphens for ligature support)
+            stdscr.addstr(1, 0, "-" * width, curses.color_pair(2))
+
+            # Draw bottom border
+            stdscr.addstr(height - 2, 0, "-" * width, curses.color_pair(2))
 
             # Draw search box with padding (only in search mode)
             if not viewing_favorites:
-                search_label = "Search: "
-                stdscr.addstr(2, 4, search_label, curses.color_pair(4))
-                stdscr.addstr(2, 4 + len(search_label), query[:width - 8 - len(search_label)])
+                search_label = "› "
+                stdscr.addstr(2, 2, search_label, curses.color_pair(4) | curses.A_BOLD)
+                query_text = query if query else "(press / to search)"
+                query_color = curses.color_pair(0) if query else curses.color_pair(2)
+                stdscr.addstr(2, 2 + len(search_label), query_text[:width - 6 - len(search_label)], query_color)
 
-            # Draw help text - simple version, but we support vim/emacs bindings secretly
+            # Draw help text with modern look
             if viewing_favorites:
-                help_text = "v:back to search | m:unmark | q:quit | Enter:man | ↑/↓:navigate"
+                help_text = "v back  │  m unmark  │  ↑↓ navigate  │  ⏎ view  │  q quit"
             else:
-                help_text = "/:search | v:favorites | m:mark | q:quit | Enter:man | ↑/↓:navigate"
-            stdscr.addstr(height - 1, 4, help_text[:width-8], curses.color_pair(2))
+                help_text = "/ search  │  v favorites  │  m mark  │  ↑↓ navigate  │  ⏎ view  │  q quit"
+            stdscr.addstr(height - 1, 2, help_text[:width-4], curses.color_pair(2))
 
-            # Calculate list area with more padding
+            # Calculate list area with padding (avoid bottom border)
             list_start_y = 4
-            list_height = height - 5
+            list_height = height - 6  # Leave space for bottom border and help text
 
             # Draw results with pagination
             if not results:
@@ -105,8 +121,8 @@ def run_tui(
 
                 # Draw page indicator if multiple pages
                 if total_pages > 1:
-                    page_info = f"Page {current_page + 1}/{total_pages}"
-                    stdscr.addstr(1, width - len(page_info) - 4, page_info, curses.color_pair(2))
+                    page_info = f"page {current_page + 1}/{total_pages}"
+                    stdscr.addstr(0, width - len(page_info) - 15, page_info, curses.color_pair(2))
 
                 for i in range(page_size):
                     result_idx = page_start + i
@@ -118,23 +134,52 @@ def run_tui(
                     description = chunk.get('semantic_summary', 'No description')
                     similarity = chunk.get('similarity', 0)
 
+                    # Strip redundant program name from description
+                    # e.g. "display - displays an image" -> "displays an image"
+                    desc_lower = description.lower()
+                    prog_lower = program.lower()
+                    # Check for common patterns: "program - description" or "program – description"
+                    for separator in [' - ', ' – ', ' — ']:
+                        prefix = prog_lower + separator
+                        if desc_lower.startswith(prefix):
+                            description = description[len(prefix):].strip()
+                            # Capitalize first letter
+                            if description:
+                                description = description[0].upper() + description[1:]
+                            break
+
                     y = list_start_y + i
                     is_selected = result_idx == selected_idx
                     is_fav = is_favorite_fn(program)
 
-                    # Format line with better spacing and favorite indicator
-                    fav_marker = "★ " if is_fav else "  "
-                    line = f"{fav_marker}{program:<22} {description}"
-                    line = line[:width-8]  # Truncate to fit with padding
-
+                    # Modern list item layout - arrow and blue text for selection
+                    # Cursor indicator (only show on selected)
                     if is_selected:
-                        # Draw selection with full-width highlight
-                        stdscr.addstr(y, 2, " " * (width - 4), curses.color_pair(3))
-                        stdscr.addstr(y, 2, line, curses.color_pair(3) | curses.A_BOLD)
+                        cursor = "▶ "
+                        stdscr.addstr(y, 2, cursor, curses.color_pair(3) | curses.A_BOLD)  # Blue arrow
                     else:
-                        # Color favorites in red
-                        color = curses.color_pair(5) if is_fav else curses.color_pair(0)
-                        stdscr.addstr(y, 2, line, color)
+                        stdscr.addstr(y, 2, "  ", curses.color_pair(0))
+
+                    # Favorite star (red) - shown after arrow/space
+                    star_x = 4
+                    if is_fav:
+                        stdscr.addstr(y, star_x, "★ ", curses.color_pair(8))  # Red star
+                    else:
+                        stdscr.addstr(y, star_x, "  ", curses.color_pair(0))  # Empty space to align
+
+                    # Program name - blue if selected, always starts at same position
+                    prog_x = 6
+                    if is_selected:
+                        prog_color = curses.color_pair(3)  # Blue for selected
+                    else:
+                        prog_color = curses.color_pair(6)  # Default (no special color for favorites)
+                    stdscr.addstr(y, prog_x, program, prog_color | curses.A_BOLD)
+
+                    # Description - blue if selected, always starts at same position
+                    desc_x = prog_x + 24
+                    desc_text = description[:width - desc_x - 2]
+                    desc_color = curses.color_pair(3) if is_selected else curses.color_pair(7)
+                    stdscr.addstr(y, desc_x, desc_text, desc_color)
 
             stdscr.refresh()
 
@@ -181,12 +226,12 @@ def run_tui(
                 # Enter search mode
                 curses.noecho()  # Disable echo, we'll handle it manually
                 curses.curs_set(1)
-                stdscr.addstr(2, 4, " " * (width - 8))  # Clear line
-                stdscr.addstr(2, 4, "Search: ", curses.color_pair(4))
+                stdscr.addstr(2, 2, " " * (width - 4))  # Clear line
+                stdscr.addstr(2, 2, "› ", curses.color_pair(4) | curses.A_BOLD)
                 stdscr.refresh()
 
                 # Get input using textpad for better control
-                input_win = curses.newwin(1, width - 16, 2, 12)
+                input_win = curses.newwin(1, width - 8, 2, 4)
                 input_win.keypad(1)
 
                 # Read input character by character to handle ESC
@@ -286,9 +331,14 @@ def run_tui(
                         stdscr = curses.initscr()
                         curses.start_color()
                         curses.use_default_colors()
-                        curses.init_pair(1, curses.COLOR_CYAN, -1)
-                        curses.init_pair(2, curses.COLOR_GREEN, -1)
-                        curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_WHITE)
-                        curses.init_pair(4, curses.COLOR_YELLOW, -1)
+                        # Reinitialize color scheme after returning from man
+                        curses.init_pair(1, curses.COLOR_BLUE, -1)
+                        curses.init_pair(2, 240, -1)
+                        curses.init_pair(3, curses.COLOR_BLUE, -1)
+                        curses.init_pair(4, curses.COLOR_BLUE, -1)
+                        curses.init_pair(5, curses.COLOR_MAGENTA, -1)
+                        curses.init_pair(6, -1, -1)
+                        curses.init_pair(7, 244, -1)
+                        curses.init_pair(8, curses.COLOR_RED, -1)
 
     curses.wrapper(main_loop)
