@@ -10,5 +10,8 @@ dependencies = [
     "faiss-cpu>=1.7.4",
 ]
 
+[tool.setuptools.packages.find]
+where = ["mana"]
+
 [project.scripts]
 mana = "mana.cli:main"
