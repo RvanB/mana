@@ -13,6 +13,44 @@ from ..config import DEFAULT_TOP_K
 from ..init_manager import InitializationManager, InitStage
 
 
+def init_color_palette():
+    """Initialize color pairs based on terminal capabilities.
+
+    Detects whether terminal supports 256 colors and falls back to
+    basic 8-color palette for terminals like Emacs that don't.
+    """
+    curses.start_color()
+    curses.use_default_colors()
+
+    # Check color capabilities AFTER start_color() - Emacs and some terminals only support 8 colors
+    # COLORS is only properly initialized after calling start_color()
+    num_colors = curses.COLORS
+    has_256_colors = num_colors >= 256
+
+    # Choose colors based on terminal capabilities
+    # Use 256-color grays if available, otherwise fall back to basic colors
+    # Note: Valid color range is 0 to COLORS-1
+    if has_256_colors:
+        dim_gray = 240
+        medium_gray = 244
+    else:
+        # For 8-color terminals, use basic white (color 7)
+        # But make sure it's within range
+        dim_gray = min(curses.COLOR_WHITE, num_colors - 1) if num_colors > 0 else curses.COLOR_WHITE
+        medium_gray = min(curses.COLOR_WHITE, num_colors - 1) if num_colors > 0 else curses.COLOR_WHITE
+
+    # Modern color palette - blue as accent color
+    curses.init_pair(1, curses.COLOR_BLUE, -1)         # Title/headers/accents - blue
+    curses.init_pair(2, dim_gray, -1)                   # Help text - dim gray (or white in 8-color)
+    curses.init_pair(3, curses.COLOR_BLUE, -1)         # Selection text - blue
+    curses.init_pair(4, curses.COLOR_BLUE, -1)         # Search label - blue
+    curses.init_pair(5, curses.COLOR_MAGENTA, -1)      # Unused
+    curses.init_pair(6, -1, -1)                         # Program names - default terminal color
+    curses.init_pair(7, medium_gray, -1)                # Descriptions - medium gray (or white in 8-color)
+    curses.init_pair(8, curses.COLOR_RED, -1)          # Favorite star - red
+    curses.init_pair(9, curses.COLOR_YELLOW, -1)       # Spinner - yellow
+
+
 def run_tui(
     initial_query: str = "",
     initial_results: List[Dict[str, str]] = None,
@@ -53,33 +91,79 @@ def run_tui(
     import time
 
     def main_loop(stdscr):
-        # Initialize modern color scheme
-        curses.start_color()
-        curses.use_default_colors()
-
-        # Modern color palette - blue as accent color
-        curses.init_pair(1, curses.COLOR_BLUE, -1)         # Title/headers/accents - blue
-        curses.init_pair(2, 240, -1)                        # Help text - dim gray
-        curses.init_pair(3, curses.COLOR_BLUE, -1)         # Selection text - blue
-        curses.init_pair(4, curses.COLOR_BLUE, -1)         # Search label - blue
-        curses.init_pair(5, curses.COLOR_MAGENTA, -1)      # Unused
-        curses.init_pair(6, -1, -1)                         # Program names - default terminal color
-        curses.init_pair(7, 244, -1)                        # Descriptions - medium gray
-        curses.init_pair(8, curses.COLOR_RED, -1)          # Favorite star - red
-        curses.init_pair(9, curses.COLOR_YELLOW, -1)       # Spinner - yellow
+        # Initialize color palette based on terminal capabilities
+        init_color_palette()
 
         results = initial_results or []
         selected_idx = 0
+        prev_selected_idx = -1  # Track previous selection for partial updates
         current_page = 0
         query = initial_query
         viewing_favorites = False  # Track if we're in favorites view
         spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
         spinner_idx = 0
+        needs_redraw = True  # Track if screen needs redrawing
+        needs_full_redraw = True  # Track if we need a full clear vs partial update
 
         # For async search
         search_in_progress = False
         search_queue = Queue()
         search_thread = None
+
+        # Helper function to draw a single result line
+        def draw_result_line(y, result_idx, is_selected, width):
+            """Draw a single result line at position y."""
+            if result_idx >= len(results):
+                # Clear the line if no result
+                stdscr.move(y, 0)
+                stdscr.clrtoeol()
+                return
+
+            chunk = results[result_idx]
+            program = chunk.get('program', 'unknown')
+            description = chunk.get('semantic_summary', 'No description')
+
+            # Strip redundant program name from description
+            desc_lower = description.lower()
+            prog_lower = program.lower()
+            for separator in [' - ', ' – ', ' — ']:
+                prefix = prog_lower + separator
+                if desc_lower.startswith(prefix):
+                    description = description[len(prefix):].strip()
+                    if description:
+                        description = description[0].upper() + description[1:]
+                    break
+
+            is_fav = is_favorite_fn(program)
+
+            # Clear the line first
+            stdscr.move(y, 0)
+            stdscr.clrtoeol()
+
+            # Draw cursor
+            if is_selected:
+                cursor = "▶ "
+                stdscr.addstr(y, 2, cursor, curses.color_pair(3) | curses.A_BOLD)
+            else:
+                stdscr.addstr(y, 2, "  ", curses.color_pair(0))
+
+            # Draw star
+            star_x = 4
+            if is_fav:
+                stdscr.addstr(y, star_x, "★ ", curses.color_pair(8))
+            else:
+                stdscr.addstr(y, star_x, "  ", curses.color_pair(0))
+
+            # Draw program name
+            prog_x = 6
+            prog_color = curses.color_pair(3) if is_selected else curses.color_pair(6)
+            stdscr.addstr(y, prog_x, program, prog_color | curses.A_BOLD)
+
+            # Draw description
+            desc_x = prog_x + 24
+            desc_text = description[:width - desc_x - 2]
+            desc_color = curses.color_pair(3) if is_selected else curses.color_pair(7)
+            stdscr.addstr(y, desc_x, desc_text, desc_color)
 
         # Use provided model_ready_event and model_loading_error for model status
         def start_search(q, query, top_k):
@@ -97,170 +181,178 @@ def run_tui(
                 q.put([])
 
         # Hide cursor by default
-        curses.curs_set(0)
-        
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+            
         # Set non-blocking input for spinner animation
         stdscr.nodelay(True)
         stdscr.timeout(100)  # 100ms timeout for getch()
 
         while True:
-            stdscr.clear()
             height, width = stdscr.getmaxyx()
-            
+
             # Check if we're still initializing
+            was_initializing = is_initializing if 'is_initializing' in locals() else False
             is_initializing = init_manager and not init_manager.is_complete() and not init_manager.is_error()
 
-            # Draw title with icon
-            if viewing_favorites:
-                title = "★ Favorites"
-                stdscr.addstr(0, 2, title, curses.color_pair(1) | curses.A_BOLD)
-            else:
-                title = "◉ mana"
-                stdscr.addstr(0, 2, title, curses.color_pair(1) | curses.A_BOLD)
+            # If initialization just completed, trigger a full redraw
+            if was_initializing and not is_initializing:
+                needs_redraw = True
+                needs_full_redraw = True
 
-            # Draw initialization status or count in top right
-            if is_initializing and init_manager:
-                status = init_manager.get_status()
-                spinner = spinner_chars[spinner_idx % len(spinner_chars)]
-                status_text = f"{spinner} {status.message}"
-                stdscr.addstr(0, width - len(status_text) - 2, status_text, curses.color_pair(9))
-                spinner_idx += 1
-            elif results:
-                count_text = f"{len(results)} results"
-                stdscr.addstr(0, width - len(count_text) - 2, count_text, curses.color_pair(2))
+            # Only redraw if needed or if animations are active
+            if needs_redraw or is_initializing or search_in_progress:
+                # Full clear only when necessary (but always clear during init/search for changing messages)
+                if needs_full_redraw or is_initializing or search_in_progress:
+                    stdscr.clear()
+                    needs_full_redraw = False
+                needs_redraw = False  # Reset flag after clearing
 
-            # Draw horizontal line under the header (using hyphens for ligature support)
-            stdscr.addstr(1, 0, "-" * width, curses.color_pair(2))
-
-            # Draw bottom border
-            stdscr.addstr(height - 2, 0, "-" * width, curses.color_pair(2))
-
-            # If initializing, show status message in center
-            if is_initializing and init_manager:
-                status = init_manager.get_status()
-                
-                # Center status messages
-                center_y = height // 2
-                
-                # Draw spinner and main message
-                spinner = spinner_chars[spinner_idx % len(spinner_chars)]
-                main_msg = f"{spinner}  {status.message}"
-                msg_x = max(2, (width - len(main_msg)) // 2)
-                stdscr.addstr(center_y, msg_x, main_msg, curses.color_pair(9) | curses.A_BOLD)
-                
-                # Draw progress bar if we have progress info
-                if status.total > 0:
-                    bar_width = min(60, width - 10)
-                    bar_x = (width - bar_width) // 2
-                    percent = int((status.current / status.total) * 100)
-                    filled = int((bar_width * percent) / 100)
-                    bar = "█" * filled + "░" * (bar_width - filled)
-                    bar_text = f"[{bar}] {percent}%"
-                    stdscr.addstr(center_y + 2, bar_x, bar_text, curses.color_pair(2))
-                    
-                    # Show detail message below if available
-                    if status.current > 0 and status.total > 0:
-                        detail = f"{status.current}/{status.total}"
-                        detail_x = (width - len(detail)) // 2
-                        stdscr.addstr(center_y + 3, detail_x, detail, curses.color_pair(7))
-                
-                # Help text for initializing state
-                help_text = "Initializing...  │  q quit"
-                stdscr.addstr(height - 1, 2, help_text[:width-4], curses.color_pair(2))
-            else:
-                # Normal UI - draw search box with padding (only in search mode)
-                if not viewing_favorites:
-                    search_label = "› "
-                    stdscr.addstr(2, 2, search_label, curses.color_pair(4) | curses.A_BOLD)
-                    query_text = query if query else "(press / to search)"
-                    query_color = curses.color_pair(0) if query else curses.color_pair(2)
-                    stdscr.addstr(2, 2 + len(search_label), query_text[:width - 6 - len(search_label)], query_color)
-
-                # If search is in progress, show spinner and message
-                if search_in_progress:
-                    spinner = spinner_chars[spinner_idx % len(spinner_chars)]
-                    msg = f"{spinner} Searching..."
-                    msg_x = max(2, (width - len(msg)) // 2)
-                    stdscr.addstr(height // 2, msg_x, msg, curses.color_pair(9) | curses.A_BOLD)
-
-                # Draw help text with modern look
+                # Draw title with icon
                 if viewing_favorites:
-                    help_text = "v back  │  m unmark  │  ↑↓ navigate  │  ⏎ view  │  q quit"
+                    title = "★ Favorites"
+                    stdscr.addstr(0, 2, title, curses.color_pair(1) | curses.A_BOLD)
                 else:
-                    help_text = "/ search  │  v favorites  │  m mark  │  ↑↓ navigate  │  ⏎ view  │  q quit"
-                stdscr.addstr(height - 1, 2, help_text[:width-4], curses.color_pair(2))
+                    title = "◉ mana"
+                    stdscr.addstr(0, 2, title, curses.color_pair(1) | curses.A_BOLD)
 
-            # Calculate list area with padding (avoid bottom border)
-            list_start_y = 4
-            list_height = height - 6  # Leave space for bottom border and help text
+                # Draw initialization status or count in top right
+                if is_initializing and init_manager:
+                    status = init_manager.get_status()
+                    spinner = spinner_chars[spinner_idx % len(spinner_chars)]
+                    status_text = f"{spinner} {status.message}"
+                    stdscr.addstr(0, width - len(status_text) - 2, status_text, curses.color_pair(9))
+                    spinner_idx += 1
+                elif results:
+                    count_text = f"{len(results)} results"
+                    stdscr.addstr(0, width - len(count_text) - 2, count_text, curses.color_pair(2))
 
-            # Draw results with pagination (only when not initializing or searching)
-            if is_initializing or search_in_progress:
-                # Don't show results during initialization or search
-                pass
-            elif not results:
-                # Just show empty space when no results
-                pass
-            else:
-                page_size = list_height
-                total_pages = (len(results) + page_size - 1) // page_size  # Ceiling division
-                current_page = max(0, min(current_page, total_pages - 1))
+                # Draw horizontal line under the header (using hyphens for ligature support)
+                stdscr.addstr(1, 0, "-" * width, curses.color_pair(2))
 
-                page_start = current_page * page_size
-                page_end = min(page_start + page_size, len(results))
+                # Draw bottom border
+                stdscr.addstr(height - 2, 0, "-" * width, curses.color_pair(2))
 
-                # Draw page indicator if multiple pages
-                if total_pages > 1:
-                    page_info = f"page {current_page + 1}/{total_pages}"
-                    stdscr.addstr(0, width - len(page_info) - 15, page_info, curses.color_pair(2))
+                # If initializing, show status message in center
+                if is_initializing and init_manager:
+                    status = init_manager.get_status()
 
-                for i in range(page_size):
-                    result_idx = page_start + i
-                    if result_idx >= page_end:
-                        break
+                    # Center status messages
+                    center_y = height // 2
 
-                    chunk = results[result_idx]
-                    program = chunk.get('program', 'unknown')
-                    description = chunk.get('semantic_summary', 'No description')
-                    similarity = chunk.get('similarity', 0)
+                    # Draw spinner and main message
+                    spinner = spinner_chars[spinner_idx % len(spinner_chars)]
+                    main_msg = f"{spinner}  {status.message}"
+                    msg_x = max(2, (width - len(main_msg)) // 2)
+                    stdscr.addstr(center_y, msg_x, main_msg, curses.color_pair(9) | curses.A_BOLD)
 
-                    # Strip redundant program name from description
-                    desc_lower = description.lower()
-                    prog_lower = program.lower()
-                    for separator in [' - ', ' – ', ' — ']:
-                        prefix = prog_lower + separator
-                        if desc_lower.startswith(prefix):
-                            description = description[len(prefix):].strip()
-                            if description:
-                                description = description[0].upper() + description[1:]
+                    # Draw progress bar if we have progress info
+                    if status.total > 0:
+                        bar_width = min(60, width - 10)
+                        bar_x = (width - bar_width) // 2
+                        percent = int((status.current / status.total) * 100)
+                        filled = int((bar_width * percent) / 100)
+                        bar = "█" * filled + "░" * (bar_width - filled)
+                        bar_text = f"[{bar}] {percent}%"
+                        stdscr.addstr(center_y + 2, bar_x, bar_text, curses.color_pair(2))
+
+                        # Show detail message below if available
+                        if status.current > 0 and status.total > 0:
+                            detail = f"{status.current}/{status.total}"
+                            detail_x = (width - len(detail)) // 2
+                            stdscr.addstr(center_y + 3, detail_x, detail, curses.color_pair(7))
+
+                    # Help text for initializing state
+                    help_text = "Initializing...  │  q quit"
+                    stdscr.addstr(height - 1, 2, help_text[:width-4], curses.color_pair(2))
+                else:
+                    # Normal UI - draw search box with padding (only in search mode)
+                    if not viewing_favorites:
+                        search_label = "› "
+                        stdscr.addstr(2, 2, search_label, curses.color_pair(4) | curses.A_BOLD)
+                        query_text = query if query else "(press / to search)"
+                        query_color = curses.color_pair(0) if query else curses.color_pair(2)
+                        stdscr.addstr(2, 2 + len(search_label), query_text[:width - 6 - len(search_label)], query_color)
+
+                    # If search is in progress, show spinner and message
+                    if search_in_progress:
+                        spinner = spinner_chars[spinner_idx % len(spinner_chars)]
+                        msg = f"{spinner} Searching..."
+                        msg_x = max(2, (width - len(msg)) // 2)
+                        stdscr.addstr(height // 2, msg_x, msg, curses.color_pair(9) | curses.A_BOLD)
+
+                    # Draw help text with modern look
+                    if viewing_favorites:
+                        help_text = "v back  │  m unmark  │  ↑↓ navigate  │  ⏎ view  │  q quit"
+                    else:
+                        help_text = "/ search  │  v favorites  │  m mark  │  ↑↓ navigate  │  ⏎ view  │  q quit"
+                    stdscr.addstr(height - 1, 2, help_text[:width-4], curses.color_pair(2))
+
+                # Calculate list area with padding (avoid bottom border)
+                list_start_y = 4
+                list_height = height - 6  # Leave space for bottom border and help text
+
+                # Draw results with pagination (only when not initializing or searching)
+                if is_initializing or search_in_progress:
+                    # Don't show results during initialization or search
+                    pass
+                elif not results:
+                    # Just show empty space when no results
+                    pass
+                else:
+                    page_size = list_height
+                    total_pages = (len(results) + page_size - 1) // page_size  # Ceiling division
+                    current_page = max(0, min(current_page, total_pages - 1))
+
+                    page_start = current_page * page_size
+                    page_end = min(page_start + page_size, len(results))
+
+                    # Draw page indicator if multiple pages
+                    if total_pages > 1:
+                        page_info = f"page {current_page + 1}/{total_pages}"
+                        stdscr.addstr(0, width - len(page_info) - 15, page_info, curses.color_pair(2))
+
+                    for i in range(page_size):
+                        result_idx = page_start + i
+                        if result_idx >= page_end:
                             break
+                        y = list_start_y + i
+                        is_selected = result_idx == selected_idx
+                        draw_result_line(y, result_idx, is_selected, width)
 
-                    y = list_start_y + i
-                    is_selected = result_idx == selected_idx
-                    is_fav = is_favorite_fn(program)
+                stdscr.refresh()
 
-                    if is_selected:
-                        cursor = "▶ "
-                        stdscr.addstr(y, 2, cursor, curses.color_pair(3) | curses.A_BOLD)
-                    else:
-                        stdscr.addstr(y, 2, "  ", curses.color_pair(0))
+            # Handle partial updates for navigation (when only selection changed)
+            # This eliminates flicker by only redrawing the two affected lines
+            elif not is_initializing and not search_in_progress and results:
+                list_start_y = 4
+                list_height = height - 6
+                page_size = list_height
+                page_start = current_page * page_size
 
-                    star_x = 4
-                    if is_fav:
-                        stdscr.addstr(y, star_x, "★ ", curses.color_pair(8))
-                    else:
-                        stdscr.addstr(y, star_x, "  ", curses.color_pair(0))
+                # Check if only the selection changed (no full redraw needed)
+                if prev_selected_idx != selected_idx and prev_selected_idx != -1:
+                    # Both selections are on the same page
+                    prev_page = prev_selected_idx // page_size
+                    curr_page = selected_idx // page_size
 
-                    prog_x = 6
-                    prog_color = curses.color_pair(3) if is_selected else curses.color_pair(6)
-                    stdscr.addstr(y, prog_x, program, prog_color | curses.A_BOLD)
+                    if prev_page == curr_page == current_page:
+                        # Redraw only the two affected lines
+                        if prev_selected_idx >= page_start and prev_selected_idx < page_start + page_size:
+                            prev_y = list_start_y + (prev_selected_idx - page_start)
+                            draw_result_line(prev_y, prev_selected_idx, False, width)
 
-                    desc_x = prog_x + 24
-                    desc_text = description[:width - desc_x - 2]
-                    desc_color = curses.color_pair(3) if is_selected else curses.color_pair(7)
-                    stdscr.addstr(y, desc_x, desc_text, desc_color)
+                        if selected_idx >= page_start and selected_idx < page_start + page_size:
+                            curr_y = list_start_y + (selected_idx - page_start)
+                            draw_result_line(curr_y, selected_idx, True, width)
 
-            stdscr.refresh()
+                        stdscr.refresh()
+
+            # Update previous selection for next iteration
+            if selected_idx != prev_selected_idx:
+                prev_selected_idx = selected_idx
 
             # Handle input and search thread
             try:
@@ -282,6 +374,8 @@ def run_tui(
                     search_in_progress = False
                     selected_idx = 0
                     current_page = 0
+                    needs_redraw = True
+                    needs_full_redraw = True
                 except Empty:
                     spinner_idx += 1
                     continue
@@ -305,6 +399,8 @@ def run_tui(
                         results = []
                     selected_idx = 0
                     current_page = 0
+                needs_redraw = True
+                needs_full_redraw = True
             elif key == ord('m'):
                 if results and 0 <= selected_idx < len(results):
                     program = results[selected_idx].get('program', '')
@@ -316,11 +412,17 @@ def run_tui(
                                 selected_idx = len(results) - 1
                             elif not results:
                                 selected_idx = 0
+                            needs_full_redraw = True
+                        # Just redraw the current line to update the star
+                        needs_redraw = True
             elif key == ord('/') or key == ord('s') or (not results and key >= 32 and key <= 126):
                 if viewing_favorites:
                     continue
                 curses.noecho()
-                curses.curs_set(1)
+                try:
+                    curses.curs_set(1)  # Show cursor during input
+                except curses.error:
+                    pass  # Some terminals don't support cursor visibility control
                 stdscr.addstr(2, 2, " " * (width - 4))
                 stdscr.addstr(2, 2, "› ", curses.color_pair(4) | curses.A_BOLD)
                 stdscr.refresh()
@@ -356,7 +458,10 @@ def run_tui(
 
                 del input_win
                 curses.noecho()
-                curses.curs_set(0)
+                try:
+                    curses.curs_set(0)  # Hide cursor again
+                except curses.error:
+                    pass  # Some terminals don't support cursor visibility control
 
                 # Only update if we didn't cancel
                 if new_query is not None and new_query.strip():
@@ -367,12 +472,19 @@ def run_tui(
                     search_thread.daemon = True
                     search_thread.start()
                     spinner_idx = 0
+                    needs_redraw = True
+                    needs_full_redraw = True
+                else:
+                    # User canceled search, need to redraw
+                    needs_redraw = True
+                    needs_full_redraw = True
             elif key == curses.KEY_DOWN or key == ord('j') or key == ord('n'):
                 if results:
                     page_size = list_height
                     page_start = current_page * page_size
                     page_end = min(page_start + page_size, len(results))
 
+                    old_page = current_page
                     if selected_idx < len(results) - 1:
                         selected_idx += 1
                         # If we moved past the current page, go to next page
@@ -382,11 +494,16 @@ def run_tui(
                         # At the last item, wrap to first item on first page
                         selected_idx = 0
                         current_page = 0
+                    # Only need full redraw if page changed
+                    needs_redraw = True
+                    if old_page != current_page:
+                        needs_full_redraw = True
             elif key == curses.KEY_UP or key == ord('k') or key == ord('p'):
                 if results:
                     page_size = list_height
                     page_start = current_page * page_size
 
+                    old_page = current_page
                     if selected_idx > 0:
                         selected_idx -= 1
                         # If we moved before the current page, go to previous page
@@ -396,6 +513,10 @@ def run_tui(
                         # At the first item, wrap to last item on last page
                         selected_idx = len(results) - 1
                         current_page = (len(results) - 1) // page_size
+                    # Only need full redraw if page changed
+                    needs_redraw = True
+                    if old_page != current_page:
+                        needs_full_redraw = True
             elif key == curses.KEY_RIGHT or key == ord('l') or key == ord('f'):
                 if results:
                     page_size = list_height
@@ -404,6 +525,8 @@ def run_tui(
                         current_page += 1
                         # Move selection to first item on new page
                         selected_idx = current_page * page_size
+                        needs_redraw = True
+                        needs_full_redraw = True  # Page change always needs full redraw
             elif key == curses.KEY_LEFT or key == ord('h') or key == ord('b'):
                 if results:
                     page_size = list_height
@@ -411,6 +534,8 @@ def run_tui(
                         current_page -= 1
                         # Move selection to first item on new page
                         selected_idx = current_page * page_size
+                        needs_redraw = True
+                        needs_full_redraw = True  # Page change always needs full redraw
             elif key == ord('\n') or key == curses.KEY_ENTER or key == 10:
                 # View man page
                 if results and 0 <= selected_idx < len(results):
@@ -421,16 +546,10 @@ def run_tui(
                         os.system('clear')
                         subprocess.run(["man", program])
                         stdscr = curses.initscr()
-                        curses.start_color()
-                        curses.use_default_colors()
                         # Reinitialize color scheme after returning from man
-                        curses.init_pair(1, curses.COLOR_BLUE, -1)
-                        curses.init_pair(2, 240, -1)
-                        curses.init_pair(3, curses.COLOR_BLUE, -1)
-                        curses.init_pair(4, curses.COLOR_BLUE, -1)
-                        curses.init_pair(5, curses.COLOR_MAGENTA, -1)
-                        curses.init_pair(6, -1, -1)
-                        curses.init_pair(7, 244, -1)
-                        curses.init_pair(8, curses.COLOR_RED, -1)
+                        init_color_palette()
+                        needs_redraw = True
+                        needs_full_redraw = True
 
     curses.wrapper(main_loop)
+    
